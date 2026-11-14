@@ -22,6 +22,13 @@ function canonicalKey(filePath) {
   return process.platform === "win32" ? normalized.toLowerCase() : normalized;
 }
 
+// Paths written by qmake on Windows use backslashes. Elsewhere a backslash is
+// an ordinary file name character, so read them as separators there. Only the
+// paths this script resolves are converted; the compiler command stays as is.
+function platformPath(value) {
+  return process.platform === "win32" ? value : value.replaceAll("\\", "/");
+}
+
 function stripQuotes(value) {
   const trimmed = value.trim();
   if (trimmed.length >= 2 && trimmed.startsWith('"') && trimmed.endsWith('"')) {
@@ -199,7 +206,7 @@ function inspectMakefile(found) {
 
   const buildDirectory = path.dirname(found.filePath);
   const projectPath = path.normalize(
-    path.resolve(buildDirectory, stripQuotes(projectHeader[1])),
+    path.resolve(buildDirectory, platformPath(stripQuotes(projectHeader[1]))),
   );
   return {
     buildDirectory,
@@ -246,7 +253,7 @@ function chooseMakefiles(candidates) {
 
 function makeEntry(candidate, sourceToken) {
   const sourceValue = stripQuotes(sourceToken);
-  const file = path.normalize(path.resolve(candidate.buildDirectory, sourceValue));
+  const file = path.normalize(path.resolve(candidate.buildDirectory, platformPath(sourceValue)));
   const isC = path.extname(sourceValue).toLowerCase() === ".c";
   const compiler = expandVariable(isC ? "CC" : "CXX", candidate.variables);
   const flags = expandVariable(isC ? "CFLAGS" : "CXXFLAGS", candidate.variables);
