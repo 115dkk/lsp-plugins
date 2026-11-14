@@ -1,0 +1,339 @@
+#!/usr/bin/env node
+
+import {
+  existsSync,
+  lstatSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import path from "node:path";
+
+const SKIPPED_DIRECTORIES = new Set([".git", "node_modules", ".cache"]);
+const MAKEFILE_PREFERENCE = new Map([
+  ["Makefile.Release", 0],
+  ["Makefile.Debug", 1],
+  ["Makefile", 2],
+]);
+
+function canonicalKey(filePath) {
+  const normalized = path.normalize(filePath);
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+// Paths written by qmake on Windows use backslashes. Elsewhere a backslash is
+// an ordinary file name character, so read them as separators there. Only the
+// paths this script resolves are converted; the compiler command stays as is.
+function platformPath(value) {
+  return process.platform === "win32" ? value : value.replaceAll("\\", "/");
+}
+
+function stripQuotes(value) {
+  const trimmed = value.trim();
+  if (trimmed.length >= 2 && trimmed.startsWith('"') && trimmed.endsWith('"')) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+
+function nearestProjectRoot(startDirectory) {
+  let directory = path.resolve(startDirectory);
+  while (true) {
+    if (existsSync(path.join(directory, ".git"))) {
+      return directory;
+    }
+    const parent = path.dirname(directory);
+    if (parent === directory) {
+      return path.resolve(startDirectory);
+    }
+    directory = parent;
+  }
+}
+
+function parseArguments(argv) {
+  let root;
+  let output;
+  let dryRun = false;
+
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index];
+    if (argument === "--dry-run") {
+      dryRun = true;
+      continue;
+    }
+    if (argument === "--root" || argument === "--output") {
+      const value = argv[index + 1];
+      if (!value || value.startsWith("--")) {
+        throw new Error(`${argument} requires a path.`);
+      }
+      if (argument === "--root") {
+        root = path.resolve(value);
+      } else {
+        output = path.resolve(value);
+      }
+      index += 1;
+      continue;
+    }
+    throw new Error(`Unknown argument: ${argument}`);
+  }
+
+  const resolvedRoot = root ?? nearestProjectRoot(process.cwd());
+  return {
+    dryRun,
+    output: output ?? path.join(resolvedRoot, "compile_commands.json"),
+    root: resolvedRoot,
+  };
+}
+
+function findMakefiles(root) {
+  const makefiles = [];
+
+  function visit(directory, depth) {
+    let entries;
+    try {
+      entries = readdirSync(directory, { withFileTypes: true });
+    } catch (error) {
+      if (depth === 0) {
+        throw error;
+      }
+      return;
+    }
+
+    for (const entry of entries) {
+      const entryPath = path.join(directory, entry.name);
+      let stats;
+      try {
+        stats = lstatSync(entryPath);
+      } catch {
+        continue;
+      }
+      if (stats.isSymbolicLink()) {
+        continue;
+      }
+      if (stats.isFile() && MAKEFILE_PREFERENCE.has(entry.name)) {
+        makefiles.push({ filePath: entryPath, mtimeMs: stats.mtimeMs });
+        continue;
+      }
+      if (
+        stats.isDirectory() &&
+        depth < 3 &&
+        !SKIPPED_DIRECTORIES.has(entry.name.toLowerCase())
+      ) {
+        visit(entryPath, depth + 1);
+      }
+    }
+  }
+
+  visit(root, 0);
+  return makefiles;
+}
+
+function logicalLines(contents) {
+  const physicalLines = contents.split(/\r?\n/);
+  const lines = [];
+
+  for (let index = 0; index < physicalLines.length; index += 1) {
+    let line = physicalLines[index];
+    while (/\\\s*$/.test(line) && index + 1 < physicalLines.length) {
+      line = line.replace(/\s*\\\s*$/, " ") + physicalLines[index + 1].trimStart();
+      index += 1;
+    }
+    lines.push(line);
+  }
+  return lines;
+}
+
+function parseVariables(contents) {
+  const variables = new Map();
+  for (const line of logicalLines(contents)) {
+    if (/^\s*#/.test(line)) {
+      continue;
+    }
+    const match = line.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
+    if (match) {
+      variables.set(match[1], match[2]);
+    }
+  }
+  return variables;
+}
+
+function expandVariable(name, variables, depth = 0, active = new Set()) {
+  if (depth >= 10 || active.has(name) || !variables.has(name)) {
+    return "";
+  }
+  const nextActive = new Set(active);
+  nextActive.add(name);
+  return expandText(variables.get(name), variables, depth + 1, nextActive);
+}
+
+function expandText(value, variables, depth = 0, active = new Set()) {
+  if (depth >= 10) {
+    return value.replace(/\$\([^)]+\)/g, "");
+  }
+  return value.replace(/\$\(([^)]+)\)/g, (_match, name) =>
+    expandVariable(name, variables, depth, active),
+  );
+}
+
+function sourceTokens(value) {
+  return value.match(/"(?:\\.|[^"\\])*"|\S+/g) ?? [];
+}
+
+function inspectMakefile(found) {
+  let contents;
+  try {
+    contents = readFileSync(found.filePath, "utf8");
+  } catch {
+    return null;
+  }
+
+  const firstLines = contents.split(/\r?\n/).slice(0, 15);
+  if (!firstLines.some((line) => line.includes("Generated by qmake"))) {
+    return null;
+  }
+
+  const projectHeader = contents.match(/^# Project:\s+(.+?)\s*$/m);
+  if (!projectHeader) {
+    return null;
+  }
+
+  const variables = parseVariables(contents);
+  const sourcesValue = expandVariable("SOURCES", variables).trim();
+  if (!sourcesValue) {
+    return null;
+  }
+
+  const buildDirectory = path.dirname(found.filePath);
+  const projectPath = path.normalize(
+    path.resolve(buildDirectory, platformPath(stripQuotes(projectHeader[1]))),
+  );
+  return {
+    buildDirectory,
+    directoryMtimeMs: statSync(buildDirectory).mtimeMs,
+    fileMtimeMs: found.mtimeMs,
+    filePath: found.filePath,
+    makefileRank: MAKEFILE_PREFERENCE.get(path.basename(found.filePath)),
+    projectKey: canonicalKey(projectPath),
+    projectPath,
+    sources: sourceTokens(sourcesValue),
+    variables,
+  };
+}
+
+function chooseMakefiles(candidates) {
+  const selected = new Map();
+  for (const candidate of candidates) {
+    const previous = selected.get(candidate.projectKey);
+    if (!previous) {
+      selected.set(candidate.projectKey, candidate);
+      continue;
+    }
+
+    const sameDirectory = canonicalKey(previous.buildDirectory) === canonicalKey(candidate.buildDirectory);
+    let useCandidate = false;
+    if (sameDirectory) {
+      useCandidate = candidate.makefileRank < previous.makefileRank;
+    } else if (candidate.directoryMtimeMs !== previous.directoryMtimeMs) {
+      useCandidate = candidate.directoryMtimeMs > previous.directoryMtimeMs;
+    } else if (candidate.fileMtimeMs !== previous.fileMtimeMs) {
+      useCandidate = candidate.fileMtimeMs > previous.fileMtimeMs;
+    } else {
+      useCandidate = candidate.filePath.localeCompare(previous.filePath) < 0;
+    }
+
+    if (useCandidate) {
+      selected.set(candidate.projectKey, candidate);
+    }
+  }
+  return [...selected.values()].sort((left, right) =>
+    left.projectPath.localeCompare(right.projectPath),
+  );
+}
+
+function makeEntry(candidate, sourceToken) {
+  const sourceValue = stripQuotes(sourceToken);
+  const file = path.normalize(path.resolve(candidate.buildDirectory, platformPath(sourceValue)));
+  const isC = path.extname(sourceValue).toLowerCase() === ".c";
+  const compiler = expandVariable(isC ? "CC" : "CXX", candidate.variables);
+  const flags = expandVariable(isC ? "CFLAGS" : "CXXFLAGS", candidate.variables);
+  const includePath = expandVariable("INCPATH", candidate.variables);
+  const command = [compiler, flags, includePath, "-c", sourceToken]
+    .filter((part) => part.length > 0)
+    .join(" ");
+  return {
+    directory: path.normalize(candidate.buildDirectory),
+    file,
+    command,
+  };
+}
+
+function generate(root) {
+  const inspected = findMakefiles(root)
+    .map(inspectMakefile)
+    .filter(Boolean);
+  const projects = chooseMakefiles(inspected);
+  const entriesByFile = new Map();
+
+  for (const project of projects) {
+    project.entryCount = project.sources.length;
+    for (const source of project.sources) {
+      const entry = makeEntry(project, source);
+      const key = canonicalKey(entry.file);
+      const previous = entriesByFile.get(key);
+      if (
+        !previous ||
+        project.fileMtimeMs > previous.makefileMtimeMs ||
+        (project.fileMtimeMs === previous.makefileMtimeMs &&
+          project.filePath.localeCompare(previous.makefilePath) < 0)
+      ) {
+        entriesByFile.set(key, {
+          entry,
+          makefileMtimeMs: project.fileMtimeMs,
+          makefilePath: project.filePath,
+        });
+      }
+    }
+  }
+
+  const entries = [...entriesByFile.values()]
+    .map((value) => value.entry)
+    .sort((left, right) => left.file.localeCompare(right.file));
+  return { entries, projects };
+}
+
+function summary(projects, entries, output, dryRun) {
+  const lines = projects.map(
+    (project) =>
+      `Project ${project.projectPath}: ${project.filePath} (${project.entryCount} entries)`,
+  );
+  lines.push(`Total entries: ${entries.length}`);
+  lines.push(`Output: ${output}${dryRun ? " (dry run)" : ""}`);
+  return `${lines.join("\n")}\n`;
+}
+
+function main() {
+  let options;
+  try {
+    options = parseArguments(process.argv.slice(2));
+    const { entries, projects } = generate(options.root);
+    if (projects.length === 0) {
+      process.stdout.write(
+        `No qmake-generated Makefile with SOURCES found under ${options.root}. Run qmake for the project first.\n`,
+      );
+      process.exitCode = 1;
+      return;
+    }
+
+    if (!options.dryRun) {
+      writeFileSync(options.output, `${JSON.stringify(entries, null, 2)}\n`, "utf8");
+    }
+    process.stdout.write(summary(projects, entries, options.output, options.dryRun));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`${message}\n`);
+    process.exitCode = 2;
+  }
+}
+
+main();
