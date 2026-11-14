@@ -1,0 +1,3 @@
+# Only the repository root. The test fixtures keep a stub ESLint under
+# test/fixtures/**/node_modules, and that one has to be committed.
+/node_modules/

@@ -1,0 +1,33 @@
+# Test
+#
+# The hook script uses only Node built-ins, so the Node that ships on the
+# runner images is enough and there is nothing to install. Both operating
+# systems run it because the hook walks Windows and POSIX paths differently.
+# `node --test` gets the test file by name: its default pattern would also
+# pick up the files under tests/**/fixtures and run them as tests.
+
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Manifests parse as JSON
+        run: node -e "for (const f of ['.claude-plugin/marketplace.json', 'plugins/web-js-stack-lsp/.claude-plugin/plugin.json', 'plugins/web-js-stack-lsp/hooks/hooks.json', 'plugins/ruff-server-lsp/.claude-plugin/plugin.json']) JSON.parse(require('fs').readFileSync(f, 'utf8'))"
+
+      - name: web-js-stack-lsp hook tests
+        run: node --test tests/web-js-stack-lsp/eslint-after-edit.test.mjs

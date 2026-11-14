@@ -1,0 +1,29 @@
+{
+  "name": "web-js-stack-lsp",
+  "version": "1.0.0",
+  "description": "Web JavaScript stack language server for Claude Code. A Svelte language server for .svelte files, and a PostToolUse hook that runs the project's own ESLint on each JS, TS or Svelte file Claude edits, so React (react-hooks), Vite (react-refresh) and Svelte (eslint-plugin-svelte) rules reach Claude right after the edit. TypeScript, JavaScript, JSX and TSX stay with the official typescript-lsp plugin.",
+  "author": {
+    "name": "115dkk",
+    "url": "https://github.com/115dkk"
+  },
+  "license": "MIT",
+  "keywords": [
+    "lsp",
+    "svelte",
+    "react",
+    "vite",
+    "eslint",
+    "hooks"
+  ],
+  "lspServers": {
+    "svelte": {
+      "command": "svelteserver",
+      "args": [
+        "--stdio"
+      ],
+      "extensionToLanguage": {
+        ".svelte": "svelte"
+      }
+    }
+  }
+}

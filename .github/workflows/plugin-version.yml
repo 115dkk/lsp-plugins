@@ -1,0 +1,87 @@
+# Plugin version
+#
+# Claude Code reads `version` in a plugin's .claude-plugin/plugin.json before
+# anything else and keeps every install on its cached copy until that string
+# changes, so a version that never changes stops all updates. This workflow
+# owns the field: after each push to main that changes a plugin, it sets that
+# plugin's `version` to 1.0.N, where N counts the commits on main that touched
+# the plugin's folder other than its own, and commits those lines. Nobody edits
+# the field by hand. A push made with GITHUB_TOKEN starts no workflow run, so
+# the commit below does not trigger this workflow again.
+# Adapted from 115dkk/make-interfaces-feel-better for several plugins.
+
+name: Plugin version
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'plugins/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: plugin-version
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Set each plugin's version from its commit count
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          set_versions() {
+            local dir manifest count
+            for dir in plugins/*/; do
+              manifest="${dir}.claude-plugin/plugin.json"
+              [ -f "$manifest" ] || continue
+              count=$(git rev-list --count --grep='^chore(version):' --invert-grep HEAD -- "$dir")
+              python3 - "$manifest" "1.0.${count}" <<'PY'
+          import json, pathlib, sys
+          path = pathlib.Path(sys.argv[1])
+          manifest = json.loads(path.read_text())
+          if manifest.get("version") != sys.argv[2]:
+              manifest["version"] = sys.argv[2]
+              path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")
+          PY
+            done
+          }
+
+          commit_versions() {
+            if git diff --quiet -- 'plugins/*/.claude-plugin/plugin.json'; then
+              return 1
+            fi
+            git commit -q -m "chore(version): set plugin versions from commit counts" -- 'plugins/*/.claude-plugin/plugin.json'
+          }
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          set_versions
+          if ! commit_versions; then
+            echo "Every plugin.json is already up to date."
+            exit 0
+          fi
+
+          # Someone may have pushed while this job ran: rebase once, recount
+          # and retry. The run their push started sets the final value anyway.
+          if ! git push origin HEAD:main; then
+            git reset -q --hard origin/main
+            git pull -q --ff-only origin main
+            set_versions
+            if ! commit_versions; then
+              exit 0
+            fi
+            git push origin HEAD:main
+          fi
+          git show --stat --oneline HEAD
