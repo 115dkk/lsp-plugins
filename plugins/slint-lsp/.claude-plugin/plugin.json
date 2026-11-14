@@ -1,6 +1,6 @@
 {
   "name": "slint-lsp",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Slint language server for Claude Code. Starts slint-lsp, Slint's own language server, for .slint files, so Claude gets Slint's diagnostics right after each edit. Markup inside slint! macros in Rust files stays with rust-analyzer.",
   "author": {
     "name": "115dkk",
