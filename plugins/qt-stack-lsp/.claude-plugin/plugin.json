@@ -1,0 +1,29 @@
+{
+  "name": "qt-stack-lsp",
+  "version": "1.0.0",
+  "description": "Qt stack support for Claude Code. A QML language server (Qt's own qmlls, found in the project's Qt installation even when it is not on PATH), a PostToolUse hook that checks edited .qml files with qmllint, .ui files with uic and .qrc files with rcc, and a skill that builds compile_commands.json from qmake-generated Makefiles so clangd can resolve Qt and project headers. C++ itself stays with the official clangd-lsp plugin.",
+  "author": {
+    "name": "115dkk",
+    "url": "https://github.com/115dkk"
+  },
+  "license": "MIT",
+  "keywords": [
+    "lsp",
+    "qt",
+    "qml",
+    "qmake",
+    "clangd",
+    "hooks"
+  ],
+  "lspServers": {
+    "qml": {
+      "command": "node",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/scripts/qmlls-launcher.mjs"
+      ],
+      "extensionToLanguage": {
+        ".qml": "qml"
+      }
+    }
+  }
+}

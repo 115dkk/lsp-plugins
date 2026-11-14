@@ -4,7 +4,7 @@
     "name": "115dkk",
     "url": "https://github.com/115dkk"
   },
-  "description": "Language server plugins for Claude Code that the official marketplace does not have: a web JavaScript stack plugin (Svelte server and an ESLint hook for React and Vite rules) and a Python plugin built on Ruff's own server.",
+  "description": "Language server plugins for Claude Code that the official marketplace does not have: a web JavaScript stack plugin (Svelte server and an ESLint hook for React and Vite rules), a Python plugin built on Ruff's own server, a Qt stack plugin (qmlls, qmllint/uic/rcc checks, a compile database for qmake projects) and a Slint plugin.",
   "plugins": [
     {
       "name": "web-js-stack-lsp",
@@ -19,6 +19,20 @@
       "description": "Python language server for Claude Code built on `ruff server`, Ruff's own language server, instead of Pyright. Claude gets Ruff's lint diagnostics for .py and .pyi files right after each edit, using the project's pyproject.toml or ruff.toml. It does not type-check and offers no go-to-definition or references.",
       "category": "development",
       "keywords": ["lsp", "python", "ruff", "lint"]
+    },
+    {
+      "name": "qt-stack-lsp",
+      "source": "./plugins/qt-stack-lsp",
+      "description": "Qt stack support for Claude Code. A QML language server (Qt's own qmlls, found in the project's Qt installation even when it is not on PATH), a PostToolUse hook that checks edited .qml files with qmllint, .ui files with uic and .qrc files with rcc, and a skill that builds compile_commands.json from qmake-generated Makefiles so clangd can resolve Qt and project headers. C++ itself stays with the official clangd-lsp plugin.",
+      "category": "development",
+      "keywords": ["lsp", "qt", "qml", "qmake", "clangd", "hooks"]
+    },
+    {
+      "name": "slint-lsp",
+      "source": "./plugins/slint-lsp",
+      "description": "Slint language server for Claude Code. Starts slint-lsp, Slint's own language server, for .slint files, so Claude gets Slint's diagnostics right after each edit. Markup inside slint! macros in Rust files stays with rust-analyzer.",
+      "category": "development",
+      "keywords": ["lsp", "slint", "gui", "rust"]
     }
   ]
 }

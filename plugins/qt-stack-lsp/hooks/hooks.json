@@ -1,0 +1,21 @@
+{
+  "description": "Checks each .qml file Claude edits with qmllint, each Qt Designer .ui file with uic and each .qrc resource file with rcc, from the project's own Qt installation, and passes the findings to Claude.",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/qt-check.mjs"
+            ],
+            "timeout": 30,
+            "statusMessage": "qmllint/uic/rcc check on the edited Qt file"
+          }
+        ]
+      }
+    ]
+  }
+}
