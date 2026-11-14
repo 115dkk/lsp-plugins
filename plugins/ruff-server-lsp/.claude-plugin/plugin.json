@@ -1,6 +1,6 @@
 {
   "name": "ruff-server-lsp",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Python language server for Claude Code built on `ruff server`, Ruff's own language server, instead of Pyright. Claude gets Ruff's lint diagnostics for .py and .pyi files right after each edit, using the project's pyproject.toml or ruff.toml. It does not type-check and offers no go-to-definition or references.",
   "author": {
     "name": "115dkk",
