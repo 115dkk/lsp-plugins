@@ -4,7 +4,7 @@
     "name": "115dkk",
     "url": "https://github.com/115dkk"
   },
-  "description": "Language server plugins for Claude Code that the official marketplace does not have: a web JavaScript stack plugin (Svelte server and an ESLint hook for React and Vite rules), a Python plugin built on Ruff's own server, a Qt stack plugin (qmlls, qmllint/uic/rcc checks, a compile database for qmake projects) and a Slint plugin.",
+  "description": "Language server plugins for Claude Code that the official marketplace does not have: a web JavaScript stack plugin (Svelte server and an ESLint hook for React and Vite rules), a Python plugin built on Ruff's own server, a Qt stack plugin (qmlls, qmllint/uic/rcc checks, a compile database for qmake projects), a Slint plugin and a whitespace guard that preserves git's checkout line endings and reports indentation mismatches.",
   "plugins": [
     {
       "name": "web-js-stack-lsp",
@@ -33,6 +33,13 @@
       "description": "Slint language server for Claude Code. Starts slint-lsp, Slint's own language server, for .slint files, so Claude gets Slint's diagnostics right after each edit. Markup inside slint! macros in Rust files stays with rust-analyzer.",
       "category": "development",
       "keywords": ["lsp", "slint", "gui", "rust"]
+    },
+    {
+      "name": "whitespace-guard",
+      "source": "./plugins/whitespace-guard",
+      "description": "After each Write or Edit, sets the file's line endings to what git would check out, or to the file's majority outside git. Reports lines just written whose indentation does not match the file's tabs-or-spaces style. It never rewrites indentation.",
+      "category": "development",
+      "keywords": ["hooks", "line-endings", "crlf", "indentation", "whitespace"]
     }
   ]
 }
