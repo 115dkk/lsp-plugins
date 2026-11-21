@@ -1,17 +1,17 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import {
+  existsSync,
   mkdtempSync,
   readFileSync,
   rmSync,
   statSync,
-  utimesSync,
   writeFileSync,
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 const TEST_DIRECTORY = path.dirname(fileURLToPath(import.meta.url));
 const REPOSITORY = path.dirname(path.dirname(TEST_DIRECTORY));
@@ -70,7 +70,25 @@ function commitAll(directory) {
   ]);
 }
 
-function runHook(input, extraEnv = {}) {
+function targetSnapshot(payload) {
+  const inputPath = payload?.tool_input?.file_path;
+  if (typeof inputPath !== "string") {
+    return null;
+  }
+  const cwd = typeof payload.cwd === "string" ? payload.cwd : REPOSITORY;
+  const filePath = path.resolve(cwd, inputPath);
+  if (!existsSync(filePath)) {
+    return null;
+  }
+  const stats = statSync(filePath);
+  if (!stats.isFile()) {
+    return null;
+  }
+  return { bytes: readFileSync(filePath), filePath, mtimeMs: stats.mtimeMs };
+}
+
+function runHook(payload, extraEnv = {}) {
+  const snapshot = targetSnapshot(payload);
   const env = { ...process.env };
   for (const name of [
     "WHITESPACE_GUARD",
@@ -84,21 +102,47 @@ function runHook(input, extraEnv = {}) {
     cwd: REPOSITORY,
     encoding: "utf8",
     env,
-    input: typeof input === "string" ? input : JSON.stringify(input),
+    input: typeof payload === "string" ? payload : JSON.stringify(payload),
     shell: false,
     timeout: 20_000,
     windowsHide: true,
   });
+
+  if (snapshot !== null) {
+    assert.deepEqual(readFileSync(snapshot.filePath), snapshot.bytes, "the hook changed target bytes");
+    assert.equal(
+      statSync(snapshot.filePath).mtimeMs,
+      snapshot.mtimeMs,
+      "the hook changed the target mtime",
+    );
+  }
   assert.equal(result.error, undefined, result.error?.message);
   assert.equal(result.status, 0, `hook exited ${result.status}: ${result.stderr}`);
   assert.equal(result.stderr, "");
-  return result.stdout;
+  return result.stdout === "" ? "" : JSON.parse(result.stdout);
+}
+
+function runPre(payload, extraEnv = {}) {
+  return runHook({ ...payload, hook_event_name: "PreToolUse" }, extraEnv);
+}
+
+function runPost(payload, extraEnv = {}) {
+  return runHook({ ...payload, hook_event_name: "PostToolUse" }, extraEnv);
+}
+
+function prePayload(directory, filename, content, toolName = "Write") {
+  return {
+    cwd: directory,
+    permission_mode: "default",
+    tool_input: { content, file_path: filename },
+    tool_name: toolName,
+    tool_use_id: "toolu_test",
+  };
 }
 
 function writeUpdate(directory, filename, originalFile, structuredPatch = []) {
   return {
     cwd: directory,
-    hook_event_name: "PostToolUse",
     tool_input: { content: readFileSync(path.join(directory, filename), "utf8"), file_path: filename },
     tool_name: "Write",
     tool_response: {
@@ -116,7 +160,6 @@ function writeUpdate(directory, filename, originalFile, structuredPatch = []) {
 function editPayload(directory, filename, structuredPatch, newString = "") {
   return {
     cwd: directory,
-    hook_event_name: "PostToolUse",
     tool_input: {
       file_path: filename,
       new_string: newString,
@@ -139,7 +182,6 @@ function editPayload(directory, filename, structuredPatch, newString = "") {
 function createPayload(directory, filename) {
   return {
     cwd: directory,
-    hook_event_name: "PostToolUse",
     tool_input: { content: readFileSync(path.join(directory, filename), "utf8"), file_path: filename },
     tool_name: "Write",
     tool_response: {
@@ -154,113 +196,104 @@ function createPayload(directory, filename) {
   };
 }
 
-test("autocrlf=true restores CRLF after a Write update", (t) => {
+function updatedContent(result) {
+  return result.hookSpecificOutput.updatedInput.content;
+}
+
+test("autocrlf=true gives a tracked Write update CRLF content without approving it", (t) => {
   const directory = repository(t, { autocrlf: "true" });
   const filename = "tracked.txt";
-  const filePath = path.join(directory, filename);
-  writeFileSync(filePath, "one\ntwo\n");
+  writeFileSync(path.join(directory, filename), "one\ntwo\n");
   commitAll(directory);
-  writeFileSync(filePath, "one\ntwo changed\n");
 
-  const stdout = runHook(writeUpdate(directory, filename, "one\ntwo\n"));
+  const result = runPre(prePayload(directory, filename, "one\ntwo changed\n"));
 
-  assert.equal(stdout, "");
-  assert.deepEqual(readFileSync(filePath), Buffer.from("one\r\ntwo changed\r\n"));
+  assert.equal(updatedContent(result), "one\r\ntwo changed\r\n");
+  assert.equal(result.hookSpecificOutput.updatedInput.file_path, filename);
+  assert.equal(JSON.stringify(result).includes("permissionDecision"), false);
 });
 
 test("a tracked CRLF index blob selects CRLF when autocrlf=false", (t) => {
   const directory = repository(t);
   const filename = "tracked.txt";
-  const filePath = path.join(directory, filename);
-  writeFileSync(filePath, "one\r\ntwo\r\n");
+  writeFileSync(path.join(directory, filename), "one\r\ntwo\r\n");
   commitAll(directory);
-  writeFileSync(filePath, "one\ntwo changed\n");
 
-  const stdout = runHook(writeUpdate(directory, filename, "one\ntwo\n"));
+  const result = runPre(prePayload(directory, filename, "one\ntwo changed\n"));
 
-  assert.equal(stdout, "");
-  assert.deepEqual(readFileSync(filePath), Buffer.from("one\r\ntwo changed\r\n"));
+  assert.equal(updatedContent(result), "one\r\ntwo changed\r\n");
 });
 
-test("a tracked LF file is not rewritten", (t) => {
+test("a tracked LF file needs no updated input", (t) => {
   const directory = repository(t);
   const filename = "tracked.txt";
-  const filePath = path.join(directory, filename);
-  writeFileSync(filePath, "one\ntwo\n");
+  writeFileSync(path.join(directory, filename), "one\ntwo\n");
   commitAll(directory);
-  const oldTime = new Date("2001-02-03T04:05:06Z");
-  utimesSync(filePath, oldTime, oldTime);
-  const before = statSync(filePath).mtimeMs;
-  const bytes = readFileSync(filePath);
 
-  const stdout = runHook(writeUpdate(directory, filename, "one\ntwo\n"));
-
-  assert.equal(stdout, "");
-  assert.deepEqual(readFileSync(filePath), bytes);
-  assert.equal(statSync(filePath).mtimeMs, before);
+  assert.equal(runPre(prePayload(directory, filename, "one\ntwo changed\n")), "");
 });
 
 test("an eol=lf attribute overrides autocrlf=true", (t) => {
   const directory = repository(t, { autocrlf: "true" });
   writeFileSync(path.join(directory, ".gitattributes"), "*.sh text eol=lf\n");
   const filename = "script.sh";
-  const filePath = path.join(directory, filename);
-  writeFileSync(filePath, "#!/bin/sh\nprintf ok\n");
+  writeFileSync(path.join(directory, filename), "#!/bin/sh\nprintf ok\n");
   commitAll(directory);
-  writeFileSync(filePath, "#!/bin/sh\r\nprintf changed\r\n");
 
-  const stdout = runHook(writeUpdate(directory, filename, "#!/bin/sh\nprintf ok\n"));
+  const result = runPre(prePayload(directory, filename, "#!/bin/sh\r\nprintf changed\r\n"));
 
-  assert.equal(stdout, "");
-  assert.deepEqual(readFileSync(filePath), Buffer.from("#!/bin/sh\nprintf changed\n"));
+  assert.equal(updatedContent(result), "#!/bin/sh\nprintf changed\n");
 });
 
-test("a tracked -text file skips line endings and indentation", (t) => {
-  const directory = repository(t);
+test("a -text attribute skips line-ending conversion", (t) => {
+  const directory = repository(t, { autocrlf: "true" });
   writeFileSync(path.join(directory, ".gitattributes"), "*.dat -text\n");
   const filename = "opaque.dat";
-  const filePath = path.join(directory, filename);
-  writeFileSync(filePath, "root\n\tone\n\ttwo\n\tthree\n\tfour\n\tfive\n");
+  writeFileSync(path.join(directory, filename), "one\ntwo\n");
   commitAll(directory);
-  const bytes = Buffer.from("root\r\n\tone\r\n\ttwo\r\n\tthree\r\n\tfour\r\n\tfive\n    bad\n");
-  writeFileSync(filePath, bytes);
-  const patch = [{ lines: ["+    bad"], newLines: 1, newStart: 7, oldLines: 0, oldStart: 7 }];
 
-  const stdout = runHook(editPayload(directory, filename, patch, "    bad"));
-
-  assert.equal(stdout, "");
-  assert.deepEqual(readFileSync(filePath), bytes);
+  assert.equal(runPre(prePayload(directory, filename, "one\ntwo changed\n")), "");
 });
 
-test("untracked files follow autocrlf=true and stay untouched with no rule", (t) => {
+test("untracked new files follow autocrlf=true and have no target with autocrlf=false", (t) => {
   const crlfDirectory = repository(t, { autocrlf: "true" });
-  const crlfPath = path.join(crlfDirectory, "new.txt");
-  writeFileSync(crlfPath, "one\ntwo\n");
-  assert.equal(runHook(createPayload(crlfDirectory, "new.txt")), "");
-  assert.deepEqual(readFileSync(crlfPath), Buffer.from("one\r\ntwo\r\n"));
+  const crlfResult = runPre(prePayload(crlfDirectory, "new.txt", "one\ntwo\n"));
+  assert.equal(updatedContent(crlfResult), "one\r\ntwo\r\n");
 
   const noRuleDirectory = repository(t);
-  const noRulePath = path.join(noRuleDirectory, "new.txt");
-  writeFileSync(noRulePath, "one\ntwo\n");
-  const before = readFileSync(noRulePath);
-  assert.equal(runHook(createPayload(noRuleDirectory, "new.txt")), "");
-  assert.deepEqual(readFileSync(noRulePath), before);
+  assert.equal(runPre(prePayload(noRuleDirectory, "new.txt", "one\ntwo\n")), "");
 });
 
 test("untracked text=auto files follow core.eol", (t) => {
-  for (const eol of ["lf", "crlf"]) {
-    const directory = repository(t, { eol });
-    writeFileSync(path.join(directory, ".gitattributes"), "* text=auto\n");
-    const filePath = path.join(directory, `${eol}.txt`);
-    writeFileSync(filePath, "one\r\ntwo\n");
+  const lfDirectory = repository(t, { eol: "lf" });
+  writeFileSync(path.join(lfDirectory, ".gitattributes"), "* text=auto\n");
+  commitAll(lfDirectory);
+  assert.equal(runPre(prePayload(lfDirectory, "new.txt", "one\ntwo\n")), "");
+  assert.equal(
+    updatedContent(runPre(prePayload(lfDirectory, "new.txt", "one\r\ntwo\r\n"))),
+    "one\ntwo\n",
+  );
 
-    assert.equal(runHook(createPayload(directory, `${eol}.txt`)), "");
-    const expected = eol === "lf" ? "one\ntwo\n" : "one\r\ntwo\r\n";
-    assert.deepEqual(readFileSync(filePath), Buffer.from(expected));
-  }
+  const crlfDirectory = repository(t, { eol: "crlf" });
+  writeFileSync(path.join(crlfDirectory, ".gitattributes"), "* text=auto\n");
+  commitAll(crlfDirectory);
+  assert.equal(
+    updatedContent(runPre(prePayload(crlfDirectory, "new.txt", "one\ntwo\n"))),
+    "one\r\ntwo\r\n",
+  );
 });
 
-test("outside git, mixed endings use their majority and uniform LF stays unchanged", (t) => {
+test("a new file under a missing directory uses repository line endings", (t) => {
+  const directory = repository(t, { autocrlf: "true" });
+  const filename = path.join("not-created", "nested", "new.txt");
+
+  const result = runPre(prePayload(directory, filename, "one\ntwo\n"));
+
+  assert.equal(updatedContent(result), "one\r\ntwo\r\n");
+  assert.equal(existsSync(path.join(directory, "not-created")), false);
+});
+
+test("outside git, existing endings are preserved in input and new files have no target", (t) => {
   const directory = temporaryDirectory(t, "whitespace-guard-outside-");
   const probe = spawnSync("git", ["rev-parse", "--show-toplevel"], {
     cwd: directory,
@@ -273,45 +306,61 @@ test("outside git, mixed endings use their majority and uniform LF stays unchang
     return;
   }
 
-  const mixedPath = path.join(directory, "mixed.txt");
-  writeFileSync(mixedPath, "one\r\ntwo\r\nthree\r\nfour\n");
-  assert.equal(runHook(createPayload(directory, "mixed.txt")), "");
-  assert.deepEqual(readFileSync(mixedPath), Buffer.from("one\r\ntwo\r\nthree\r\nfour\r\n"));
+  writeFileSync(path.join(directory, "crlf.txt"), "one\r\ntwo\r\n");
+  assert.equal(
+    updatedContent(runPre(prePayload(directory, "crlf.txt", "one\ntwo changed\n"))),
+    "one\r\ntwo changed\r\n",
+  );
 
-  const lfPath = path.join(directory, "lf.txt");
-  writeFileSync(lfPath, "one\ntwo\n");
-  const before = readFileSync(lfPath);
-  assert.equal(runHook(createPayload(directory, "lf.txt")), "");
-  assert.deepEqual(readFileSync(lfPath), before);
+  writeFileSync(path.join(directory, "mixed.txt"), "one\r\ntwo\r\nthree\r\nfour\n");
+  assert.equal(
+    updatedContent(runPre(prePayload(directory, "mixed.txt", "one\ntwo\nthree\nfour changed\n"))),
+    "one\r\ntwo\r\nthree\r\nfour changed\r\n",
+  );
+
+  assert.equal(runPre(prePayload(directory, "new.txt", "one\ntwo\n")), "");
 });
 
-test("normalization preserves lone CR, final-newline state and non-ASCII bytes", (t) => {
+test("conversion preserves lone CR, a missing final newline, and Korean text", (t) => {
   const directory = repository(t, { autocrlf: "true" });
-  const filePath = path.join(directory, "bytes.txt");
-  const bytes = Buffer.concat([
-    Buffer.from("caf", "ascii"),
-    Buffer.from([0xc3, 0xa9]),
-    Buffer.from("\rlone\r\nlast\nno-final", "latin1"),
-  ]);
-  writeFileSync(filePath, bytes);
 
-  assert.equal(runHook(createPayload(directory, "bytes.txt")), "");
-  const expected = Buffer.concat([
-    Buffer.from("caf", "ascii"),
-    Buffer.from([0xc3, 0xa9]),
-    Buffer.from("\rlone\r\nlast\r\nno-final", "latin1"),
-  ]);
-  assert.deepEqual(readFileSync(filePath), expected);
+  const result = runPre(prePayload(directory, "bytes.txt", "한글\rlone\nlast\n끝"));
+
+  assert.equal(updatedContent(result), "한글\rlone\r\nlast\r\n끝");
 });
 
-test("a NUL byte skips all processing", (t) => {
+test("content containing NUL is ignored", (t) => {
   const directory = repository(t, { autocrlf: "true" });
-  const filePath = path.join(directory, "binary.bin");
-  const bytes = Buffer.from("one\n\0two\n", "latin1");
-  writeFileSync(filePath, bytes);
 
-  assert.equal(runHook(createPayload(directory, "binary.bin")), "");
-  assert.deepEqual(readFileSync(filePath), bytes);
+  assert.equal(runPre(prePayload(directory, "binary.bin", "one\n\0two\n")), "");
+});
+
+test("PreToolUse environment switches apply to their own stages", (t) => {
+  const directory = repository(t, { autocrlf: "true" });
+  const payload = prePayload(directory, "new.txt", "one\ntwo\n");
+
+  assert.equal(runPre(payload, { WHITESPACE_GUARD: "0" }), "");
+  assert.equal(runPre(payload, { WHITESPACE_GUARD_EOL: "0" }), "");
+  assert.equal(
+    updatedContent(runPre(payload, { WHITESPACE_GUARD_INDENT: "0" })),
+    "one\r\ntwo\r\n",
+  );
+});
+
+test("a PreToolUse payload for Edit is ignored", (t) => {
+  const directory = repository(t, { autocrlf: "true" });
+
+  assert.equal(runPre(prePayload(directory, "new.txt", "one\ntwo\n", "Edit")), "");
+});
+
+test("PostToolUse never changes LF bytes in an autocrlf=true repository", (t) => {
+  const directory = repository(t, { autocrlf: "true" });
+  const filename = "tracked.txt";
+  writeFileSync(path.join(directory, filename), "one\ntwo\n");
+  commitAll(directory);
+
+  assert.equal(runPost(editPayload(directory, filename, [], "two")), "");
+  assert.deepEqual(readFileSync(path.join(directory, filename)), Buffer.from("one\ntwo\n"));
 });
 
 test("two Edit hunks report the actual changed line in a tab file", (t) => {
@@ -326,7 +375,7 @@ test("two Edit hunks report the actual changed line in a tab file", (t) => {
     { lines: ["+    bad"], newLines: 1, newStart: 9, oldLines: 0, oldStart: 9 },
   ];
 
-  const result = JSON.parse(runHook(editPayload(directory, filename, patch, "\tone\n    bad")));
+  const result = runPost(editPayload(directory, filename, patch, "\tone\n    bad"));
 
   assert.equal(result.decision, "block");
   assert.match(result.reason, /tabs/);
@@ -345,7 +394,7 @@ test("tab-style exceptions for comment continuation and alignment are allowed", 
     { lines: ["+ * comment", "+      aligned"], newLines: 2, newStart: 7, oldLines: 0, oldStart: 7 },
   ];
 
-  assert.equal(runHook(editPayload(directory, filename, patch, " * comment\n\t\t  aligned")), "");
+  assert.equal(runPost(editPayload(directory, filename, patch, " * comment\n\t\t  aligned")), "");
 });
 
 test("a tab in a changed line violates a space-style file", (t) => {
@@ -357,7 +406,7 @@ test("a tab in a changed line violates a space-style file", (t) => {
   );
   const patch = [{ lines: ["+  bad"], newLines: 1, newStart: 7, oldLines: 0, oldStart: 7 }];
 
-  const result = JSON.parse(runHook(editPayload(directory, filename, patch, "\tbad")));
+  const result = runPost(editPayload(directory, filename, patch, "\tbad"));
 
   assert.equal(result.decision, "block");
   assert.match(result.reason, /indents with spaces/);
@@ -378,7 +427,7 @@ test("ambiguous and undersized indentation samples do not report", (t) => {
     ].join("\n"),
   );
   const ambiguousPatch = [{ lines: ["+    changed"], newLines: 1, newStart: 12, oldLines: 0, oldStart: 12 }];
-  assert.equal(runHook(editPayload(directory, ambiguous, ambiguousPatch, "    changed")), "");
+  assert.equal(runPost(editPayload(directory, ambiguous, ambiguousPatch, "    changed")), "");
 
   const small = "small.cpp";
   writeFileSync(
@@ -386,7 +435,7 @@ test("ambiguous and undersized indentation samples do not report", (t) => {
     ["root", "\tone", "\ttwo", "\tthree", "\tfour", "    changed", ""].join("\n"),
   );
   const smallPatch = [{ lines: ["+    changed"], newLines: 1, newStart: 6, oldLines: 0, oldStart: 6 }];
-  assert.equal(runHook(editPayload(directory, small, smallPatch, "    changed")), "");
+  assert.equal(runPost(editPayload(directory, small, smallPatch, "    changed")), "");
 });
 
 test("Write update uses originalFile as the indentation baseline", (t) => {
@@ -396,7 +445,7 @@ test("Write update uses originalFile as the indentation baseline", (t) => {
   writeFileSync(path.join(directory, filename), `${original}    bad\n`);
   const patch = [{ lines: ["+    bad"], newLines: 1, newStart: 7, oldLines: 0, oldStart: 7 }];
 
-  const result = JSON.parse(runHook(writeUpdate(directory, filename, original, patch)));
+  const result = runPost(writeUpdate(directory, filename, original, patch));
 
   assert.equal(result.decision, "block");
   assert.match(result.reason, /in the previous version of the file/);
@@ -410,7 +459,7 @@ test("Write create uses same-extension sibling files as its baseline", (t) => {
   writeFileSync(path.join(directory, "two.CPP"), sibling);
   writeFileSync(path.join(directory, "new.cpp"), "root\n    one\n    two\n");
 
-  const result = JSON.parse(runHook(createPayload(directory, "new.cpp")));
+  const result = runPost(createPayload(directory, "new.cpp"));
 
   assert.equal(result.decision, "block");
   assert.match(result.reason, /The other \.cpp files in this folder indent with tabs/);
@@ -419,7 +468,7 @@ test("Write create uses same-extension sibling files as its baseline", (t) => {
 
   const aloneDirectory = temporaryDirectory(t);
   writeFileSync(path.join(aloneDirectory, "alone.cpp"), "root\n    one\n    two\n");
-  assert.equal(runHook(createPayload(aloneDirectory, "alone.cpp")), "");
+  assert.equal(runPost(createPayload(aloneDirectory, "alone.cpp")), "");
 });
 
 test("Edit without structuredPatch reports inserted text without line numbers", (t) => {
@@ -432,68 +481,32 @@ test("Edit without structuredPatch reports inserted text without line numbers", 
   const payload = editPayload(directory, filename, undefined, "    bad");
   delete payload.tool_response.structuredPatch;
 
-  const result = JSON.parse(runHook(payload));
+  const result = runPost(payload);
 
   assert.equal(result.decision, "block");
   assert.match(result.reason, /in the text you just inserted/);
   assert.doesNotMatch(result.reason, /: 7\./);
 });
 
-test("WHITESPACE_GUARD disables both fixes", (t) => {
-  const directory = repository(t, { autocrlf: "true" });
+test("PostToolUse environment switches only disable their own stages", (t) => {
+  const directory = temporaryDirectory(t);
   const filename = "switch.cpp";
-  const filePath = path.join(directory, filename);
-  const original = ["root", "\tone", "\ttwo", "\tthree", "\tfour", "\tfive", ""].join("\n");
-  writeFileSync(filePath, original);
-  commitAll(directory);
-  const current = `${original}    bad\n`;
-  writeFileSync(filePath, current);
-  const patch = [{ lines: ["+    bad"], newLines: 1, newStart: 7, oldLines: 0, oldStart: 7 }];
-
-  assert.equal(runHook(writeUpdate(directory, filename, original, patch), { WHITESPACE_GUARD: "OFF" }), "");
-  assert.deepEqual(readFileSync(filePath), Buffer.from(current));
-});
-
-test("WHITESPACE_GUARD_EOL leaves endings alone but still reports", (t) => {
-  const directory = repository(t, { autocrlf: "true" });
-  const filename = "switch.cpp";
-  const filePath = path.join(directory, filename);
-  const original = ["root", "\tone", "\ttwo", "\tthree", "\tfour", "\tfive", ""].join("\n");
-  writeFileSync(filePath, original);
-  commitAll(directory);
-  const current = `${original}    bad\n`;
-  writeFileSync(filePath, current);
-  const patch = [{ lines: ["+    bad"], newLines: 1, newStart: 7, oldLines: 0, oldStart: 7 }];
-
-  const result = JSON.parse(
-    runHook(writeUpdate(directory, filename, original, patch), { WHITESPACE_GUARD_EOL: "false" }),
+  writeFileSync(
+    path.join(directory, filename),
+    ["root", "\tone", "\ttwo", "\tthree", "\tfour", "\tfive", "    bad", ""].join("\n"),
   );
-  assert.equal(result.decision, "block");
-  assert.deepEqual(readFileSync(filePath), Buffer.from(current));
-});
-
-test("WHITESPACE_GUARD_INDENT fixes endings without reporting", (t) => {
-  const directory = repository(t, { autocrlf: "true" });
-  const filename = "switch.cpp";
-  const filePath = path.join(directory, filename);
-  const original = ["root", "\tone", "\ttwo", "\tthree", "\tfour", "\tfive", ""].join("\n");
-  writeFileSync(filePath, original);
-  commitAll(directory);
-  writeFileSync(filePath, `${original}    bad\n`);
   const patch = [{ lines: ["+    bad"], newLines: 1, newStart: 7, oldLines: 0, oldStart: 7 }];
+  const payload = editPayload(directory, filename, patch, "    bad");
 
-  const stdout = runHook(
-    writeUpdate(directory, filename, original, patch),
-    { WHITESPACE_GUARD_INDENT: "0" },
-  );
-  assert.equal(stdout, "");
-  assert.equal(readFileSync(filePath, "latin1").includes("\r\n"), true);
+  assert.equal(runPost(payload, { WHITESPACE_GUARD: "OFF" }), "");
+  assert.equal(runPost(payload, { WHITESPACE_GUARD_INDENT: "false" }), "");
+  assert.equal(runPost(payload, { WHITESPACE_GUARD_EOL: "false" }).decision, "block");
 });
 
 test("malformed stdin and a missing file are silent", (t) => {
   assert.equal(runHook("{not-json"), "");
   const directory = temporaryDirectory(t);
-  assert.equal(runHook(editPayload(directory, "missing.txt", [], "text")), "");
+  assert.equal(runPost(editPayload(directory, "missing.txt", [], "text")), "");
 });
 
 test("violation line numbers are compressed into ranges", (t) => {
@@ -521,7 +534,7 @@ test("violation line numbers are compressed into ranges", (t) => {
     { lines: ["+    bad9"], newLines: 1, newStart: 9, oldLines: 0, oldStart: 9 },
   ];
 
-  const result = JSON.parse(runHook(editPayload(directory, filename, patch, "    bad3\n    bad4\n    bad5\n    bad9")));
+  const result = runPost(editPayload(directory, filename, patch, "    bad3\n    bad4\n    bad5\n    bad9"));
 
   assert.equal(result.decision, "block");
   assert.match(result.reason, /3-5, 9/);
