@@ -27,10 +27,13 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Manifests parse as JSON
-        run: node -e "for (const f of ['.claude-plugin/marketplace.json', 'plugins/web-js-stack-lsp/.claude-plugin/plugin.json', 'plugins/web-js-stack-lsp/hooks/hooks.json', 'plugins/ruff-server-lsp/.claude-plugin/plugin.json', 'plugins/qt-stack-lsp/.claude-plugin/plugin.json', 'plugins/qt-stack-lsp/hooks/hooks.json', 'plugins/slint-lsp/.claude-plugin/plugin.json']) JSON.parse(require('fs').readFileSync(f, 'utf8'))"
+        run: node -e "for (const f of ['.claude-plugin/marketplace.json', 'plugins/web-js-stack-lsp/.claude-plugin/plugin.json', 'plugins/web-js-stack-lsp/hooks/hooks.json', 'plugins/ruff-server-lsp/.claude-plugin/plugin.json', 'plugins/qt-stack-lsp/.claude-plugin/plugin.json', 'plugins/qt-stack-lsp/hooks/hooks.json', 'plugins/slint-lsp/.claude-plugin/plugin.json', 'plugins/whitespace-guard/.claude-plugin/plugin.json', 'plugins/whitespace-guard/hooks/hooks.json']) JSON.parse(require('fs').readFileSync(f, 'utf8'))"
 
       - name: web-js-stack-lsp hook tests
         run: node --test tests/web-js-stack-lsp/eslint-after-edit.test.mjs
 
       - name: qt-stack-lsp tests
         run: node --test tests/qt-stack-lsp/find-qt-bin.test.mjs tests/qt-stack-lsp/qmlls-launcher.test.mjs tests/qt-stack-lsp/qt-check.test.mjs tests/qt-stack-lsp/qmake-compile-db.test.mjs
+
+      - name: whitespace-guard hook tests
+        run: node --test tests/whitespace-guard/whitespace-guard.test.mjs

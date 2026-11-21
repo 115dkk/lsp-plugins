@@ -1,6 +1,6 @@
 # lsp-plugins
 
-공식 마켓플레이스에 없는 Claude Code 언어 서버 플러그인 4개를 제공하는 마켓플레이스입니다.
+공식 마켓플레이스에 없는 Claude Code 언어 서버 플러그인 4개와, Claude가 고친 파일의 줄끝과 들여쓰기를 지키는 훅 플러그인 1개를 제공하는 마켓플레이스입니다.
 
 | 플러그인 | 맡는 파일 | 필요한 프로그램 |
 |---|---|---|
@@ -8,6 +8,7 @@
 | `ruff-server-lsp` | `.py`, `.pyi` | `ruff` |
 | `qt-stack-lsp` | `.qml`, 그리고 검사 훅으로 `.qml`, `.ui`, `.qrc` | Qt 설치본의 `qmlls`, `qmllint`, `uic`, `rcc`, Node |
 | `slint-lsp` | `.slint` | `slint-lsp` |
+| `whitespace-guard` | Claude가 Write, Edit로 고친 텍스트 파일 전부 | Node, git |
 
 ## 설치
 
@@ -19,6 +20,7 @@ claude.ai의 플러그인 설정에서 `115dkk/lsp-plugins`를 마켓플레이�
 /plugin install ruff-server-lsp@115dkk-lsp
 /plugin install qt-stack-lsp@115dkk-lsp
 /plugin install slint-lsp@115dkk-lsp
+/plugin install whitespace-guard@115dkk-lsp
 ```
 
 언어 서버 프로그램은 플러그인에 들어 있지 않습니다. 아래 안내대로 따로 설치하고, Claude Code를 띄우는 셸의 PATH에서 찾을 수 있게 두십시오.
@@ -98,3 +100,19 @@ Rust 파일 안의 `slint!` 매크로는 맡지 않습니다. `.rs` 파일은 ru
 cargo install slint-lsp --locked
 cargo binstall slint-lsp
 ```
+
+## whitespace-guard
+
+Claude가 파일을 고친 직후에 줄끝과 들여쓰기를 확인하는 훅입니다. 언어 서버는 없습니다.
+
+**줄끝.** Claude Code의 Edit 도구는 파일의 CRLF를 지키지만, Write 도구는 언제나 LF로 저장합니다. 그래서 CRLF 파일을 Write로 덮어쓰면 모든 줄이 LF가 되고, git이 `LF will be replaced by CRLF` 경고를 냅니다. 이 훅은 Write나 Edit가 끝날 때마다 그 파일의 줄끝을 git이 체크아웃할 때의 줄끝으로 맞춥니다. 추적 중인 파일은 `git cat-file --filters`가 내놓는 줄끝을 따르고, 새 파일은 `.gitattributes`의 `eol`과 `core.autocrlf`, `core.eol`을 따릅니다. git 저장소 밖에서는 한 파일에 CRLF와 LF가 섞였을 때만 많은 쪽으로 맞춥니다. 줄끝만 바꾸므로 Claude에게는 알리지 않고, Claude Code도 다음 편집을 막지 않습니다. git이 `-text`나 바이너리로 다루는 파일은 건드리지 않습니다.
+
+**들여쓰기.** Claude가 방금 쓴 줄이 파일의 들여쓰기 방식과 다르면 그 줄 번호를 Claude에게 알립니다. 탭으로 들여 쓰는 파일에 스페이스 두 칸 이상으로 시작하는 줄을 넣었거나, 스페이스로 들여 쓰는 파일에 탭을 넣은 경우입니다. 파일의 방식은 고치지 않은 나머지 줄을 보고 정합니다. Write로 덮어썼으면 이전 내용을, 새 파일이면 같은 폴더에 있는 같은 확장자 파일을 봅니다. 들여 쓴 줄이 다섯 줄이 안 되거나 어느 쪽도 90 %에 이르지 않으면 알리지 않습니다. 들여쓰기는 직접 고치지 않습니다. 문자열 리터럴 안의 공백처럼 일부러 넣은 것일 수 있어서, 고칠지는 Claude가 정합니다.
+
+훅은 Write와 Edit 도구에만 걸립니다. Claude가 Bash로 돌린 스크립트(sed, Python 등)가 고친 파일은 확인하지 않습니다.
+
+| 환경 변수 | 뜻 |
+|---|---|
+| `WHITESPACE_GUARD=0` | 훅 전체를 끕니다. |
+| `WHITESPACE_GUARD_EOL=0` | 줄끝 맞추기만 끕니다. |
+| `WHITESPACE_GUARD_INDENT=0` | 들여쓰기 알림만 끕니다. |
