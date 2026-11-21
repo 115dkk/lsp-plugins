@@ -1,6 +1,22 @@
 {
-  "description": "Sets edited files to git's checkout line endings and reports indentation that does not match the surrounding file without rewriting it.",
+  "description": "Sets line endings in the content Write is about to save, reports indentation mismatches, and never writes files itself.",
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/whitespace-guard.mjs"
+            ],
+            "timeout": 15,
+            "statusMessage": "Matching git's line endings"
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "Write|Edit|MultiEdit",
@@ -12,7 +28,7 @@
               "${CLAUDE_PLUGIN_ROOT}/hooks/whitespace-guard.mjs"
             ],
             "timeout": 15,
-            "statusMessage": "Checking line endings and indentation"
+            "statusMessage": "Checking indentation"
           }
         ]
       }

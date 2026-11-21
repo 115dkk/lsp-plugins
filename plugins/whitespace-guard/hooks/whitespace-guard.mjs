@@ -6,7 +6,6 @@ import {
   readdirSync,
   readFileSync,
   statSync,
-  writeFileSync,
 } from "node:fs";
 import path from "node:path";
 
@@ -124,10 +123,31 @@ function parseConfigOutput(output) {
   return config;
 }
 
+function nearestExistingDirectory(filePath) {
+  let directory = path.dirname(filePath);
+  while (true) {
+    try {
+      if (statSync(directory).isDirectory()) {
+        return directory;
+      }
+    } catch {
+      // Write can create missing parent directories, so keep walking upward.
+    }
+    const parent = path.dirname(directory);
+    if (parent === directory) {
+      return null;
+    }
+    directory = parent;
+  }
+}
+
 async function lineEndingTarget(filePath) {
-  const cwd = path.dirname(filePath);
-  const basename = path.basename(filePath);
-  const tracked = await runGit(["ls-files", "--eol", "--", basename], cwd);
+  const cwd = nearestExistingDirectory(filePath);
+  if (cwd === null) {
+    return null;
+  }
+  const relativePath = path.relative(cwd, filePath).replaceAll("\\", "/");
+  const tracked = await runGit(["ls-files", "--eol", "--", relativePath], cwd);
   if (!tracked || tracked.exitCode !== 0) {
     return null;
   }
@@ -150,7 +170,7 @@ async function lineEndingTarget(filePath) {
     }
 
     const filtered = await runGit(
-      ["cat-file", "--filters", `:./${basename}`],
+      ["cat-file", "--filters", `:./${relativePath}`],
       cwd,
       MAX_GIT_BUFFER_BYTES,
     );
@@ -161,7 +181,7 @@ async function lineEndingTarget(filePath) {
   }
 
   const [attributeResult, configResult] = await Promise.all([
-    runGit(["check-attr", "text", "eol", "--", basename], cwd),
+    runGit(["check-attr", "text", "eol", "--", relativePath], cwd),
     runGit(["config", "--get-regexp", "^core\\.(autocrlf|eol)$"], cwd),
   ]);
   if (!attributeResult || attributeResult.exitCode !== 0 || !configResult) {
@@ -208,10 +228,32 @@ function normalizedText(text, target) {
 
 function lineEndingTargetFromContents(text) {
   const { bareLf, crlf } = countLineEndings(text);
-  if (bareLf === 0 || crlf === 0 || bareLf === crlf) {
+  if (crlf > 0 && bareLf === 0) {
+    return "crlf";
+  }
+  if (bareLf > 0 && crlf === 0) {
+    return "lf";
+  }
+  if (bareLf === crlf) {
     return null;
   }
   return crlf > bareLf ? "crlf" : "lf";
+}
+
+function existingFileLineEndingTarget(filePath) {
+  try {
+    const stats = statSync(filePath);
+    if (!stats.isFile() || stats.size > MAX_FILE_BYTES) {
+      return null;
+    }
+    const buffer = readFileSync(filePath);
+    if (buffer.subarray(0, 8_000).includes(0)) {
+      return null;
+    }
+    return lineEndingTargetFromContents(buffer.toString("latin1"));
+  } catch {
+    return null;
+  }
 }
 
 function changedLineNumbers(structuredPatch) {
@@ -453,6 +495,95 @@ function formatReason(filePath, context, style, violations) {
   ].join("\n");
 }
 
+async function setWriteLineEndings(payload) {
+  if (isDisabled(process.env.WHITESPACE_GUARD_EOL) || payload?.tool_name !== "Write") {
+    return;
+  }
+  const inputPath = payload?.tool_input?.file_path;
+  const content = payload?.tool_input?.content;
+  if (
+    typeof inputPath !== "string" ||
+    typeof content !== "string" ||
+    content.length > MAX_FILE_BYTES ||
+    content.includes("\0")
+  ) {
+    return;
+  }
+
+  const cwd = typeof payload.cwd === "string" ? payload.cwd : process.cwd();
+  const filePath = path.resolve(cwd, inputPath);
+  const target = await lineEndingTarget(filePath);
+  if (target === "skip") {
+    return;
+  }
+  const effectiveTarget = target ?? existingFileLineEndingTarget(filePath);
+  if (effectiveTarget === null) {
+    return;
+  }
+  const updated = normalizedText(content, effectiveTarget);
+  if (updated === content) {
+    return;
+  }
+
+  process.stdout.write(
+    JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        updatedInput: { ...payload.tool_input, content: updated },
+      },
+    }),
+  );
+}
+
+function reportIndentation(payload) {
+  if (isDisabled(process.env.WHITESPACE_GUARD_INDENT)) {
+    return;
+  }
+  const inputPath = payload?.tool_input?.file_path;
+  if (typeof inputPath !== "string") {
+    return;
+  }
+  const cwd = typeof payload.cwd === "string" ? payload.cwd : process.cwd();
+  const filePath = path.resolve(cwd, inputPath);
+  const stats = statSync(filePath);
+  if (!stats.isFile() || stats.size > MAX_FILE_BYTES) {
+    return;
+  }
+
+  const buffer = readFileSync(filePath);
+  if (buffer.subarray(0, 8_000).includes(0)) {
+    return;
+  }
+  const currentLines = buffer.toString("latin1").split(/\r?\n/);
+  const context = indentationContext(payload, filePath, currentLines);
+  if (!context) {
+    return;
+  }
+  const style = classifyIndentation(context.baseline);
+  if (!style) {
+    return;
+  }
+  const violations = [];
+  for (let index = 0; index < context.changedLines.length; index += 1) {
+    if (violatesStyle(context.changedLines[index], style.style)) {
+      violations.push({
+        line: context.changedLines[index],
+        number: context.changedNumbers?.[index] ?? null,
+      });
+    }
+  }
+  if (violations.length === 0) {
+    return;
+  }
+
+  process.stdout.write(
+    JSON.stringify({
+      decision: "block",
+      reason: formatReason(filePath, context, style, violations),
+    }),
+  );
+}
+
 async function main() {
   try {
     if (isDisabled(process.env.WHITESPACE_GUARD)) {
@@ -460,69 +591,11 @@ async function main() {
     }
 
     const payload = JSON.parse(await readStdin());
-    const inputPath = payload?.tool_input?.file_path;
-    if (typeof inputPath !== "string") {
-      return;
+    if (payload?.hook_event_name === "PreToolUse") {
+      await setWriteLineEndings(payload);
+    } else if (payload?.hook_event_name === "PostToolUse") {
+      reportIndentation(payload);
     }
-    const cwd = typeof payload.cwd === "string" ? payload.cwd : process.cwd();
-    const filePath = path.resolve(cwd, inputPath);
-    const stats = statSync(filePath);
-    if (!stats.isFile() || stats.size > MAX_FILE_BYTES) {
-      return;
-    }
-
-    const originalBuffer = readFileSync(filePath);
-    if (originalBuffer.subarray(0, 8_000).includes(0)) {
-      return;
-    }
-    let text = originalBuffer.toString("latin1");
-    const target = await lineEndingTarget(filePath);
-    if (target === "skip") {
-      return;
-    }
-
-    if (!isDisabled(process.env.WHITESPACE_GUARD_EOL)) {
-      const effectiveTarget = target ?? lineEndingTargetFromContents(text);
-      if (effectiveTarget) {
-        const updated = normalizedText(text, effectiveTarget);
-        if (updated !== text) {
-          writeFileSync(filePath, Buffer.from(updated, "latin1"));
-          text = updated;
-        }
-      }
-    }
-
-    if (isDisabled(process.env.WHITESPACE_GUARD_INDENT)) {
-      return;
-    }
-    const currentLines = text.split(/\r?\n/);
-    const context = indentationContext(payload, filePath, currentLines);
-    if (!context) {
-      return;
-    }
-    const style = classifyIndentation(context.baseline);
-    if (!style) {
-      return;
-    }
-    const violations = [];
-    for (let index = 0; index < context.changedLines.length; index += 1) {
-      if (violatesStyle(context.changedLines[index], style.style)) {
-        violations.push({
-          line: context.changedLines[index],
-          number: context.changedNumbers?.[index] ?? null,
-        });
-      }
-    }
-    if (violations.length === 0) {
-      return;
-    }
-
-    process.stdout.write(
-      JSON.stringify({
-        decision: "block",
-        reason: formatReason(filePath, context, style, violations),
-      }),
-    );
   } catch {
     // Hooks stay silent when input, git, or the filesystem is unusable.
   }

@@ -105,7 +105,9 @@ cargo binstall slint-lsp
 
 Claude가 파일을 고친 직후에 줄끝과 들여쓰기를 확인하는 훅입니다. 언어 서버는 없습니다.
 
-**줄끝.** Claude Code의 Edit 도구는 파일의 CRLF를 지키지만, Write 도구는 언제나 LF로 저장합니다. 그래서 CRLF 파일을 Write로 덮어쓰면 모든 줄이 LF가 되고, git이 `LF will be replaced by CRLF` 경고를 냅니다. 이 훅은 Write나 Edit가 끝날 때마다 그 파일의 줄끝을 git이 체크아웃할 때의 줄끝으로 맞춥니다. 추적 중인 파일은 `git cat-file --filters`가 내놓는 줄끝을 따르고, 새 파일은 `.gitattributes`의 `eol`과 `core.autocrlf`, `core.eol`을 따릅니다. git 저장소 밖에서는 한 파일에 CRLF와 LF가 섞였을 때만 많은 쪽으로 맞춥니다. 줄끝만 바꾸므로 Claude에게는 알리지 않고, Claude Code도 다음 편집을 막지 않습니다. git이 `-text`나 바이너리로 다루는 파일은 건드리지 않습니다.
+**줄끝.** Claude Code의 Edit 도구는 파일의 CRLF를 지키지만, Write 도구는 Claude가 보낸 내용을 LF 그대로 저장합니다. 그래서 CRLF 파일을 Write로 덮어쓰면 모든 줄이 LF가 되고, git이 `LF will be replaced by CRLF` 경고를 냅니다. 이 훅은 Write가 실행되기 직전에, 저장할 내용의 줄끝을 git이 체크아웃할 때의 줄끝으로 바꿉니다. 추적 중인 파일은 `git cat-file --filters`가 내놓는 줄끝을 따르고, 새 파일은 `.gitattributes`의 `eol`과 `core.autocrlf`, `core.eol`을 따릅니다. git 규칙이 없는 파일(저장소 밖의 파일 등)을 덮어쓸 때는 기존 파일의 줄끝을 따르고, 섞여 있으면 많은 쪽을 따릅니다. git이 `-text`나 바이너리로 다루는 파일은 건드리지 않습니다. Claude에게는 따로 알리지 않습니다.
+
+훅은 파일에 직접 저장하지 않고, Write 도구에 넘길 내용의 줄끝만 바꿉니다. 권한 확인은 평소대로 거칩니다. Edit는 줄끝을 스스로 지키므로 훅이 손대지 않습니다.
 
 **들여쓰기.** Claude가 방금 쓴 줄이 파일의 들여쓰기 방식과 다르면 그 줄 번호를 Claude에게 알립니다. 탭으로 들여 쓰는 파일에 스페이스 두 칸 이상으로 시작하는 줄을 넣었거나, 스페이스로 들여 쓰는 파일에 탭을 넣은 경우입니다. 파일의 방식은 고치지 않은 나머지 줄을 보고 정합니다. Write로 덮어썼으면 이전 내용을, 새 파일이면 같은 폴더에 있는 같은 확장자 파일을 봅니다. 들여 쓴 줄이 다섯 줄이 안 되거나 어느 쪽도 90 %에 이르지 않으면 알리지 않습니다. 들여쓰기는 직접 고치지 않습니다. 문자열 리터럴 안의 공백처럼 일부러 넣은 것일 수 있어서, 고칠지는 Claude가 정합니다.
 

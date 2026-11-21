@@ -1,7 +1,7 @@
 {
   "name": "whitespace-guard",
   "version": "1.0.1",
-  "description": "After each Write or Edit, sets the file's line endings to what git would check out, or to the file's majority outside git. Reports lines just written whose indentation does not match the file's tabs-or-spaces style. It never rewrites indentation.",
+  "description": "Before each Write, changes the line endings of the content to what git would check out, or to the existing file's endings when git has no rule, so a CRLF file stays CRLF. After each Write or Edit, reports lines just written whose indentation does not match the file's tabs-or-spaces style. It never writes files itself.",
   "author": {
     "name": "115dkk",
     "url": "https://github.com/115dkk"
